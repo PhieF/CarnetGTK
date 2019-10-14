@@ -1,0 +1,29 @@
+{
+    "name": "python3-webdavclient",
+    "buildsystem": "simple",
+    "build-commands": [
+        "pip3 install --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} webdavclient"
+    ],
+    "sources": [
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/34/be/5800a3946827c9c47dc86f8f4d1d0d548888193a601d7952f1f9426a1724/webdavclient-1.0.8.tar.gz",
+            "sha256": "c4df5953822f87b48504fc0f4ecdb08ae6a518e67e96f9e8e27d841c0cd29d7a"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/16/4a/b085a04d6dad79aa5c00c65c9b2bbcb2c6c22e5ac341e7968e0ad2c57e2f/lxml-4.3.0.tar.gz",
+            "sha256": "d1e111b3ab98613115a208c1017f266478b0ab224a67bc8eac670fa0bad7d488"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/e8/e4/0dbb8735407189f00b33d84122b9be52c790c7c3b25286826f4e1bdb7bde/pycurl-7.43.0.2.tar.gz",
+            "sha256": "0f0cdfc7a92d4f2a5c44226162434e34f7d6967d3af416a6f1448649c09a25a4"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/3c/21/9741e5e5e63245a8cdafb32ffc738bff6e7ef6253b65953e77933e56ce88/argcomplete-1.9.4.tar.gz",
+            "sha256": "06c8a54ffaa6bfc9006314498742ec8843601206a3b94212f82657673662ecf1"
+        }
+    ]
+}
