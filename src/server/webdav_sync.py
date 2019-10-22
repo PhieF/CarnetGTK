@@ -1,12 +1,36 @@
-import webdav.client as wc
+import webdav3.client as wc
+from .settings_manager import *
+from .sync_db import *
+import lxml.etree as etree
+from io import BytesIO
+from re import sub
+from webdav3 import *
+from webdav3.exceptions import *
+from webdav3.urn import Urn
 from stat import *
+import os
 import tempfile
+import filecmp
+try:
+    from urllib.parse import unquote
+except ImportError:
+    from urllib import unquote
+
+class MyUrn(Urn):
+    def __init__(self, hree, etag, parent_path):
+        super(MyUrn, self).__init__(hree)
+        self.etag = etag
+        if(not parent_path.endswith("/")):
+            parent_path = parent_path+"/"
+        self.short_path = parent_path + self.filename()
+
+    def get_etag(self):
+        return self.etag
 
 class Sync():
-    def __init__(self, on_sync_start, on_sync_end):
-        self.on_sync_start = on_sync_start
-        self.on_sync_end = on_sync_end
-        self.sync_next = []
+
+
+
 
     def connect(self):
         options = {
@@ -16,152 +40,203 @@ class Sync():
         }
         self.client = wc.Client(options)
 
+    def list(self, remote_path="/"):
+        def parse(directory_urn, response):
 
+            try:
+                response_str = response.content
 
-    def start_sync(self, on_dir_ok):
-        self.is_full_sync = on_dir_ok == -1
-        if(on_dir_ok == None):
-            on_dir_ok = self.on_dir_ok
+                tree = etree.fromstring(response_str)
+                hrees = [unquote(hree.text) for hree in tree.findall(".//{DAV:}href")]
+                etags = [unquote(etag.text) for etag in tree.findall(".//{DAV:}getetag")]
+                i=0
+                ret = []
+                for hree in hrees:
+                    if(i == 0):
+                        i = i+1
+                        continue
+                    urn = MyUrn(hree, etags[i], remote_path)
+                    ret.append(urn)
 
-        self.has_download_smt = False
-        if(settingsManager.get_webdav_server() == None or settingsManager.get_webdav_username() == None or settingsManager.get_webdav_password() == None):
-            self.exit()
-            return False
-        if(self.is_syncing):
-            return False
-        self.is_syncing = True
-        self.on_sync_start()
-        self.connect()
-        self.nextcloud_root = settingsManager.get_webdav_path()
+                    i = i+1
+                return ret
+            except etree.XMLSyntaxError:
 
-        file = open('sync_db.json', 'r')
-        text = file.read()
-        file.close()
-        self.db = json.loads(text)
-        self.remoteFiles = {}
-        self.remoteFilesStack = []
+                return list()
 
-        self.remoteFoldersToVisit = [];
-        self.localFoldersToVisit = [];
-        self.localFiles = [];
-        self.localDirToRm = []
-        self.remoteDirToRm = []
-        self.toUpload = [];
-        self.filesToStat = []
-        self.toDownload = [];
-        self.toFix = [];
-        self.toDeleteLocal = [];
-        self.toDeleteRemote = [];
-        self.client.createDirectory(self.nextcloud_root).then(function () {
-            on_dir_ok();
-        }).catch(function (err) {
-            print(err);
-            on_dir_ok();
-        });
-        return True;
+        try:
+            directory_urn = Urn(remote_path, directory=True)
 
-    def correctPath (nextcloudRoot, path):
-        if (path.startswith(nextcloudRoot)):
-            path = path.substr(nextcloudRoot.length)
-        if (path.startswith("/" + nextcloudRoot)):
-            path = path.substr(nextcloudRoot.length + 1)
-        if (path.startswith("/")):
-            path = path.substr(1)
-        return path
+            if directory_urn.path() != wc.Client.root:
+                if not self.client.check(directory_urn.path()):
+                    raise RemoteResourceNotFound(directory_urn.path())
+            response = BytesIO()
+            response = self.client.execute_request(action='list', path=directory_urn.quote())
+            urns = parse(directory_urn, response)
+            return urns
 
+        except Exception:
+            raise NotConnection(self.client.webdav.hostname)
 
-    def correct_local_path (localRoot, path):
-        if (path.startswith(localRoot)):
-            path = path.substr(localRoot.length):
-        if (path.startswith("/")):
-            path = path.substr(1)
-        return path;
+    def visit_remote (self, path):
+        print("visitRemote "+path)
+        items = self.list(path)
+        for item in items:
+            print("item  "+self.correct_remote_path(item.short_path))
+            new_db_item = DBItem.from_nc(self.correct_remote_path(item.short_path), item)
+            db_item = self.sync_db.get(self.account, self.correct_remote_path(item.short_path))
+            if(item.is_dir()):
+                print("item db "+str(db_item))
+                if(db_item == None or db_item['remote_etag'] != item.etag):
+                    self.visit_remote(item.short_path)
+                else:
+                    print("already in DB")
+                    ls = self.sync_db.get_list(self.account)
+                    for in_folder in ls :
+                        if(in_folder.startswith(db_item['path'])):
+                            print("adding "+in_folder)
+                            self.remote_files[in_folder] = ls[in_folder]
+            if(db_item != None):
+                db_item['remote_etag'] = new_db_item['remote_etag']
+                self.sync_db.set(self.account, new_db_item['path'], db_item)
+            else:
+                self.sync_db.set(self.account, new_db_item['path'], new_db_item)
+            self.remote_files[new_db_item['path']] = new_db_item
 
+        self.sync_db.write()
 
-    def on_dir_ok(self):
-        def on_visit_remote_end():
-            count = 0;
-            for (var k in self.remote_files):
-                if (self.remote_files.hasOwnProperty(k)):
-                    ++count;
-            def on_visit_local_end():
-                def on_local_handle_end():
-                    def on_remote_handle_end():
-                        self.exit();
-                    self.handle_remote_items(self.remote_files_stack.shift(), on_remote_handle_end)
-                self.handle_local_items(self.local_files.shift(), on_local_handle_end)
+    def handle_remote_items(self, remote_db_Item):
+        if (remote_db_item == None):
+            return
+        print("handle_remote_items")
 
-            self.visit_local(settingsHelper.getNotePath(),on_visit_local_end)
-        self.visit_remote(self.nextcloudRoot, on_visit_remote_end);
-
-
-    def upload_and_save(self, local_db_item, callback):
-        print("uploading: "+local_db_item.path)
-        if(local_db_item['type'] == "directory"):
-
+        in_db_item = self.sync_db.get(self.account, remote_db_item['path'])
+        if (in_db_item == None):
+            #download
+            self.download_and_save(remote_db_item, cb)
         else:
-            self.client.upload_sync(rthis.nextcloud_root + "/" + local_db_item.path, local_db_item.path)
+            if (in_db_item.synced_etag == remote_db_item.synced_etag):
+                #delete remote
+                self.delete_remote_and_save(remote_db_item, cb)
+            else:
+                self.download_and_save(remote_db_item, cb)
+
+
+    def visit_local(self, path):
+        for root, dirs, files in os.walk(path, topdown=False):
+            for name in files:
+               self.local_files.append(DBItem.from_fs(self.correct_local_path(os.path.join(root, name)), os.stat(os.path.join(root, name))))
+            for name in dirs:
+               self.local_files.append(DBItem.from_fs(self.correct_local_path(os.path.join(root, name)), os.stat(os.path.join(root, name))))
 
 
 
-Sync.prototype.uploadAndSave = function (local_db_item, callback) {
-    console.logDebug("uploading " + local_db_item.path)
-    var sync = this;
-    if (local_db_item.type === "directory") {
-        console.logDebug("mkdir")
-        this.client.createDirectory(this.nextcloudRoot + "/" + local_db_item.path).then(function () {
-            sync.client.stat(sync.nextcloudRoot + "/" + local_db_item.path).then(function (stat) {
-                DBItem.fromNC(sync.nextcloudRoot, stat)
-                sync.save(local_db_item, DBItem.fromNC(sync.nextcloudRoot, stat))
-                console.logDebug(JSON.stringify(stat, undefined, 4));
-                callback()
-            }).catch(function (err) {
-                console.logDebug(err);
-                sync.exit();
-            });
-        })
-
-    } else {
-        var data = this.fs.readFileSync(this.settingsHelper.getNotePath() + "/" + local_db_item.path);
-
-        this.client.putFileContents(this.nextcloudRoot + "/" + local_db_item.path, data, { format: "binary" }).then(function (contents) {
-
-            sync.client.stat(sync.nextcloudRoot + "/" + local_db_item.path).then(function (stat) {
-                DBItem.fromNC(sync.nextcloudRoot, stat)
-                sync.save(local_db_item, DBItem.fromNC(sync.nextcloudRoot, stat))
-                console.logDebug(JSON.stringify(stat, undefined, 4));
-                callback()
-            }).catch(function (err) {
-                console.logDebug(err);
-                sync.exit();
-            });
-        });
-    }
-}
+    def handle_local_items(self, local_db_item):
+        if (local_db_item == None):
+            return False
+        in_db_item = self.sync_db.get(self.account, local_db_item['path']);
+        print(local_db_item['path'])
+        try:
+            remote_db_item = self.remote_files[local_db_item['path']]
+        except KeyError:
+            remote_db_item = None
+        if (remote_db_item != None):
+            del self.remote_files[local_db_item['path']];
 
 
-    def save(self, local, remote):
-        local.remotelastmod = remote.remotelastmod
-        self.db[local.path] = local
-        self.saveDB()
+        if (in_db_item == None): #has never been synced
+            if (remote_db_item == None): #is not on server
+                #upload  and save
+                print("not on server")
+                self.upload_and_save(local_db_item)
+            else: #is on server
+                #conflict
+                if (not local_db_item['ftype']):
+                    print("conflict on " + local_db_item['path'])
+                    self.fix_conflict(local_db_item, remote_db_item, cb)
+                else:
+                    self.save(local_db_item, remote_db_item)
+                    return
 
+        else: #has already been synced
+            if (remote_db_item == None): #is not on server
+                if (local_db_item['locallastmod'] == in_db_item['locallastmod']): # was already sent
+                    #delete local...
+                    self.delete_local_and_save(local_db_item)
+                else:
+                    #upload
+                    print("not up to date on server")
+                    self.upload_and_save(local_db_item)
+            else: #is on server
 
-    def saveDB(self):
-        file = open('db.json', 'w')
-        file.write(json.dumps(self.db))
-        file.close()
+                if (remote_db_item['remote_etag'] == in_db_item['synced_etag']):
+                    if (local_db_item['locallastmod'] == in_db_item['locallastmod']):
+                        print("nothing to do !")
+                        return
+                    else:
+                        #upload
+                        if (not in_db_item['ftype']):
+                            sync.upload_and_save(local_db_item)
+                        else:
+                            self.save(local_db_item, remote_db_item)
+                            return
+                elif (local_db_item['locallastmod'] == in_db_item['locallastmod']):
+                    #download
+                    if (not local_db_item['ftype']):
+                        self.download_and_save(remote_db_item)
+                    else:
+                        self.save(local_db_item, remote_db_item)
+                        return
+                else:
+                    #conflict
 
-    def download_and_save(self, remote_db_item, callback) {
-        print("downloading " + remote_db_item.path)
-        fpath = settingsHelper.getNotePath() + "/" + remote_db_item.path
-        if (remote_db_item.type === "directory"):
+                    if (not local_db_item['ftype']):
+                        print("conflict on " + local_db_item['path'])
+                        self.fix_conflict(local_db_item, remote_db_item)
+                    else:
+                        self.save(local_db_item, remote_db_item)
+                        return
+
+    def fix_conflict(self, local_db_item, remote_db_item):
+        fpath = tempfile.gettempdir()+"/tmpconflictfix.sqd"
+        self.download_file(self.remote_path + "/" + remote_db_item['path'], fpath)
+        if(filecmp.cmp(fpath, self.local_path+"/"+local_db_item['path'], shallow=False)):
+            #fixed
+            os.remove(fpath)
+            self.save(local_db_item, remote_db_item)
+        else:
+            print("real conflict... fixing")
+            split_name = os.path.splitext(local_db_item['path'])
+            new_name = split_name[0]+" conflit "+date
+            if(len(split_name)>1):
+                new_name += split_name[1]
+            os.rename(local_db_item.path, os.path.join(os.path.dirname(local_db_item.path),new_name))
+            os.rename(fpath,local_db_item.path)
+            sync.save(local_db_item, remote_db_item)
+    #broken in webdav client
+    def download_file(self, remote_path, local_path):
+        """Downloads file from WebDAV server and save it locally.
+        More information you can find by link http://webdav.org/specs/rfc4918.html#rfc.section.9.4
+        :param remote_path: the path to remote file for downloading.
+        :param local_path: the path to save file locally.
+        :param progress: progress function. Not supported now.
+        """
+        urn = Urn(remote_path)
+
+        with open(local_path, 'wb') as local_file:
+            response = self.client.execute_request('download', urn.quote())
+            for block in response.iter_content(1024):
+                local_file.write(block)
+    def download_and_save(self, remote_db_item):
+        print("downloading " + remote_db_item['path'])
+        fpath = self.local_path + "/" + remote_db_item['path']
+        if (remote_db_item["ftype"]):
             try:
                 os.makedirs(fpath)
                 if (success):
-                    const stat = sync.fs.statSync(fpath)
+                    stat = sync.fs.statSync(fpath)
                     sync.save(DBItem.fromFS(sync.settingsHelper.getNotePath(), fpath, stat), remote_db_item)
                     sync.hasDownloadedSmt = true;
-                    callback();
             except Error:
                 print("error")
                 self.exit()
@@ -169,199 +244,97 @@ Sync.prototype.uploadAndSave = function (local_db_item, callback) {
 
         else:
             try:
-                self.client.download_sync(self.nextcloud_root + "/" + remote_db_item.path, fpath)
+                self.download_file(self.remote_path + "/" + remote_db_item['path'], fpath)
                 stat = os.stat(fpath)
-                sync.save(DBItem(sync.settingsHelper.getNotePath(), fpath, stat), remote_db_item)
+                self.save(DBItem.from_fs(self.correct_local_path(fpath), stat), remote_db_item)
                 self.has_downloaded_smt = True;
-                callback();
-            except Error:
+            except Exception:
                 print("Error downloading "+remote_db_Item.path);
                 self.exit();
 
-    def exit(self):
-        self.is_syncing = False
-        print("exit")
-        if(self.is_full_sync):
-            print("setting sync to 10 minutes")
 
-        self.on_sync_end(self.has_download_smt)
-        if (this.syncNext.length > 0):
-            to_sync = this.syncNext.pop();
-            self.syncOneItem(to_sync.path, to_sync.callback)
-
-    def deleteLocalAndSave(self, local, callback):
-        if (local.type === "directory"):
-            print("delete dir later")
-            self.local_dir_to_rm.append(local)
-            callback()
+    def upload_and_save(self, local_db_item):
+        print("uploading: "+local_db_item['path'])
+        if(local_db_item['ftype']):
+            self.client.mkdir(self.remote_path + "/"+ local_db_item['path'])
         else:
-            print("delete " + settingsHelper.getNotePath() + "/" + local.path)
-            os.remove(this.settingsHelper.getNotePath() + "/" + local.path)
-            del self.db[local.path];
-            self.saveDB()
 
+            self.client.upload_sync( self.remote_path + "/"+ local_db_item['path'],self.local_path + "/" + local_db_item['path'])
+        self.save(local_db_item, self.get_info(self.remote_path + "/"+ local_db_item['path']))
 
-    def handle_remote_items(self, remote_db_Item, callback):
-        if (remote_db_item == None):
-            callback()
-            return
-        print("handle_remote_items")
-        def cb ():
-             self.handle_remote_items(self.remote_files_stack.pop(0), callback)
+    #client.info() not working...
+    def get_info(self, path):
+        items = self.list(os.path.dirname(path))
+        for item in items:
+            print(path + " "+item.short_path)
+            if(item.short_path == path):
+                return DBItem.from_nc(self.correct_remote_path(item.short_path), item)
 
-        in_db_item = sync.db[remote_db_item.path];
-        if (in_db_item === None):
-            #download
-            self.download_and_save(remote_db_item, cb)
-        else:
-            if (in_db_item.remotelastmod === remote_db_Item.remotelastmod):
-                #delete remote
-                self.delete_remote_and_save(remote_db_item, cb)
-            else:
-                self.download_and_save(remote_db_item, cb)
+    def save(self, local, remote):
+        local['remote_etag'] = remote['remote_etag']
+        local['synced_etag'] = remote['remote_etag']
+        self.sync_db.set(self.account, local['path'], local)
+        self.sync_db.write()
 
-    def deleteRemoteAndSave(self, remote, callback) {
-        print("delete remote " + remote.path)
-        if (remote.type === "directory"):
-            self.remote_dir_to_rm.append(remote)
-            callback()
-        else:
-            try:
-                self.client.clean(self.nextcloud_root + "/" + remote.path)
-            except Error:
-                sync.exit()
+    def start_sync(self):
+        self.connect()
 
+        self.remote_files = {}
+        self.local_files = []
 
+        self.sync_db = SyncDB()
+        self.account = 0
+        self.local_path = "/home/phieubuntu/Carnet"
+        self.remote_path = "/Documents/QuickNote"
 
-    def handle_local_items(self, local_db_item, callback):
-        if (local_db_item == None):
-            callback()
-            return False
-        in_db_item = self.db[local_db_item.path];
-        print(local_db_item.path)
-        var sync = this;
-        var inDBItem = sync.db[local_db_item.path];
-        var remote_db_item = self.remote_files[local_db_item.path];
-        if (remote_db_item != None):
-            del self.remote_files_stack[self.remote_files_stack.indexof(remote_db_item), 1];
-        def cb1():
-            self.handle_local_items(sync.localFiles.pop(0), callback)
+        self.visit_remote(self.remote_path)
+        self.visit_local(self.local_path)
+        for item in self.local_files:
+            self.handle_local_items(item)
 
-        cb = cb1
-        if (in_db_item == None): #has never been synced
-            if (remote_db_item == None): #is not on server
-                #upload  and save
-                print("not on server")
-                self.upload_and_save(local_db_item, cb)
-            else: #is on server
-                if (remote_db_item.remotelastmod !== local_db_item.locallastmod):
-                    #conflict
-                    if (local_db_item.type !== "directory"):
-                        print("conflict on " + local_db_item.path)
-                        self.fix_conflict(local_db_item, remote_db_item, cb)
-                    else:
-                        cb()
+    def correct_local_path (self, path):
+        local_path = self.local_path
+        if (path.startswith(local_path)):
+            path = path[len(local_path):]
+        if (path.startswith("/")):
+            path = path[1:]
+        print("local path "+path)
+        return path;
 
-                else:
-                    #that's ok !
-                    print("OK 1 ")
-                    self.save(local_db_item, remote_db_item, cb)
-        else: #has already been synced
-            if (remote_db_item == None): #is not on server
-                if (local_db_item.locallastmod === inDBItem.locallastmod): # was already sent
-                    #delete local...
-                    self.delete_local_and_save(local_db_item, cb)
-                else:
-                    #upload
-                    print("not up to date on server")
-                    self.upload_and_save(local_db_item, cb)
-            else: #is on server
-                if (remote_db_item.remotelastmod === inDBItem.remotelastmod):
-                    if (local_db_item.locallastmod === inDBItem.locallastmod):
-                        print("nothing to do !")
-                        cb();
-                    else:
-                        #upload
-                        if (inDBItem.type !== "directory"):
-                            sync.upload_and_save(local_db_item, cb)
-                        else cb()
-                else if (local_db_item.locallastmod === inDBItem.locallastmod):
-                    #download
-                    if (local_db_item.type !== "directory"):
-                        self.download_and_save(remote_db_item, cb)
-                    else cb()
-                else:
-                    #conflict
-
-                    if (local_db_item.type !== "directory"):
-                        print("conflict on " + local_db_item.path)
-                        self.fix_conflict(local_db_item, remote_db_item, cb)
-                    else cb()
-
-
-    def fix_conflict(self, local_db_item, remote_db_item, callback):
-        fpath = tempfile.gettempdir()+"/tmpconflictfix.sqd"
-        self.client.download_sync(self.nextcloud_root + "/" + remote_db_item.path, fpath)
-        if(filecmp.cmp(fpath, local_db_item.path, shallow=False)):
-            #fixed
-            os.remove(fpath)
-            self.save(local_db_item, remote_db_item)
-            callback();
-        else:
-            print("real conflict... fixing")
-            split_name = os.path.splitext(local_db_item.path)
-            new_name = split_name[0]+" conflit "+date
-            if(len(split_name)>1):
-                new_name += split_name[1]
-            os.rename(local_db_item.path, os.path.join(os.path.dirname(local_db_item.path),new_name))
-            os.rename(fpath,local_db_item.path)
-            sync.save(local_db_item, remote_db_item)
-            callback()
-    def visit_local(self, path, callback):
-        for root, dirs, files in os.walk(path, topdown=False):
-           for name in files:
-              self.local_files.append(DBFile.from_fs(Sync.correct_local_path(settingsManager.getNotePath(),os.path.join(root, name)), os.stat(os.path.join(root, name)))
-           for name in dirs:
-              self.local_files.append(DBFile.from_fs(Sync.correct_local_path(settingsManager.getNotePath(),os.path.join(root, name)), os.stat(os.path.join(root, name)))
-
-
-Sync.prototype.visitRemote = function (path, callback) {
-    var sync = this;
-    this.client
-        .getDirectoryContents(path)
-        .then(function (contents) {
-            for (var i of contents) {
-                var item = DBItem.fromNC(sync.nextcloudRoot, i)
-                /*if (this.db[item.path] !== undefined && this.db[item.path].remotelastmod === item.remotelastmod){
-
-                }*/
-                sync.remoteFiles[item.path] = item;
-                sync.remoteFilesStack.push(item)
-                if (item.type == "directory")
-                    sync.remoteFoldersToVisit.push(i.filename)
-                // console.logDebug(correctPath(sync.nextcloudRoot, i.filename));
-            }
-            // console.logDebug("sync.remoteFoldersToVisit.length " + sync.remoteFoldersToVisit.length)
-            if (sync.remoteFoldersToVisit.length !== 0) {
-                sync.visitRemote(sync.remoteFoldersToVisit.pop(), callback)
-            } else
-                callback()
-        }).catch(function (err) {
-            console.logDebug(err);
-            sync.exit();
-        });
-}
+    def correct_remote_path (self, path):
+        if (path.startswith(self.remote_path)):
+            path = path[len(self.remote_path):]
+        if (path.startswith("/" + self.remote_path)):
+            path = path[len(self.remote_path)+ 1:]
+        if (path.startswith("/")):
+            path = path[1:]
+        if (path.endswith("/")):
+            path = path[:len(path)-1]
+        return path
 
 
 class DBItem():
-    def __init__(self, path, locallastmod, remotelastmod, type):
-        self.path = path
-        self.locallastmod = locallastmod
-        self.remotelastmod = remotelastmod
-        self.type=type
 
-    def from_nc(ncroot, ncitem):
-        return DBItem()
+
+    def from_nc(path, ncitem):
+        dbitem = {}
+        dbitem['path'] = path
+        dbitem['locallastmod'] = None
+        dbitem['synced_etag'] = None
+        dbitem['remote_etag'] = ncitem.get_etag()
+        dbitem['ftype'] =ncitem.is_dir()
+
+        return dbitem
 
     def from_fs(path, stat):
-        return DBItem(path, stat.st_mtime, S_ISDIR(stat.st_mode) ? "file" : "directory"
+        dbitem = {}
+        dbitem['path'] =path
+        dbitem['locallastmod'] = stat.st_mtime
+        dbitem['synced_etag'] = None
+        dbitem['remote_etag'] = None
+
+        if S_ISDIR(stat.st_mode):
+            dbitem['ftype'] = True
+        else:
+            dbitem['ftype'] = False
+        return dbitem

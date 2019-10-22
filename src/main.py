@@ -21,9 +21,11 @@ import os
 gi.require_version('Gtk', '3.0')
 gi.require_version('Handy', '0.0')
 from gi.repository import Gtk, Gio
-
+import webdav3.client as wc
 from .window import CarnetgtkWindow
 from .server import Server
+from .settings_manager import *
+from .webdav_sync import Sync
 os.environ["WEBKIT_INSPECTOR_SERVER"] = "127.0.0.1:1234"
 class Application(Gtk.Application):
     def __init__(self):
@@ -33,13 +35,17 @@ class Application(Gtk.Application):
     def do_activate(self):
         server = Server()
         server.start()
+        #sync = Sync()
+        #sync.start_sync()
+        print("bla")
+        #sync.start_sync()
         win = self.props.active_window
         if not win:
             win = CarnetgtkWindow(application=self)
-        print("pet")
         win.present()
-
 
 def main(version):
     app = Application()
     return app.run(sys.argv)
+
+win = None

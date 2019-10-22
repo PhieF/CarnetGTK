@@ -50,6 +50,7 @@ class CarnetgtkWindow(Gtk.ApplicationWindow):
         }
         .note_none{
                 background:white;
+                border:solid 1px #e0e0e0;
         }
        .note_red{
             background: rgb(241, 166, 166);
@@ -144,7 +145,7 @@ class CarnetgtkWindow(Gtk.ApplicationWindow):
 
         if(not hasattr(self, "webview")):
             self.webview = WebKit2.WebView()
-            self.webview.load_uri("http://localhost:8099/reader/reader.html?path="+path)
+            self.webview.load_uri("http://localhost:9098/reader/reader.html?path="+path)
             self.webview.connect("notify::title", self.window_title_change) #only way to receive messages...
             self.main_view.add(self.webview)
             self.main_view.show_all()

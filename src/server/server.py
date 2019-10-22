@@ -217,7 +217,7 @@ class myHandler(BaseHTTPRequestHandler):
     def getTmpNoteDir(self):
         return  tempfile.gettempdir()+"/CarnetGTK/Note";
 class Server():
-    PORT_NUMBER = 8098
+    PORT_NUMBER = 9076
     def server_thread(z):
         try:
 	        #Create a web server and define the handler to manage the

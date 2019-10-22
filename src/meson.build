@@ -39,10 +39,12 @@ carnetgtk_sources = [
   'ui/editor_toolbar.py',
   'note_widget.py',
   'libs/html2text.py',
+  'server/webdav_sync.py',
   'server/server.py',
   'server/settings_manager.py',
   'server/notes/note_manager.py',
   'server/databases/recent_db_manager.py',
+  'server/databases/sync_db.py',
   'server/databases/keyword_db_manager.py',
 ]
 
