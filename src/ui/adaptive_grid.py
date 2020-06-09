@@ -68,9 +68,9 @@ class AdaptiveGrid(Gtk.ScrolledWindow):
             self.set_columns_count(self.current)
             self.show_all()
         #for column in  self.columns:
-         #   column.set_size_request(self.get_allocation().width/ newColumnCount -20, 0)
+        #    column.set_size_request(self.get_allocation().width/ newColumnCount -20, 0)
 
-        self.queue_draw()
+            self.queue_draw()
     def add_child(self, child):
         self.children.append(child)
         if(self.column_rows != None): #wait for first resize
